@@ -3,18 +3,19 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-require('dotenv').config()
+require('dotenv').config();
+const cookieParser = require('cookie-parser');
+
 const app = express();
 
 // Middleware
-app.use(cors() );
-app.use(express.json());
-
-
 app.use(cors({
-  origin: 'http://localhost:3000',  // Only allow your frontend's origin
-  credentials: true,  
+  origin: 'http://localhost:3000', // Frontend origin
+  credentials: true,
 }));
+app.use(express.json());
+app.use(cookieParser());
+
 // Connect to MongoDB
 mongoose.connect('mongodb://localhost:27017/mernauth', { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log('Connected to MongoDB'))
@@ -26,34 +27,28 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true }
 });
-
 const User = mongoose.model('User', userSchema);
 
-const generateTokens = (userId) => {
-  const accessToken = jwt.sign({ email:userId}, process.env.JWT_SECRET, { expiresIn: '1m' });  
-  const refreshToken = jwt.sign({ email: userId }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '1d' }); 
+// Generate tokens
+const generateTokens = (email) => {
+  const accessToken = jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '1m' });
+  const refreshToken = jwt.sign({ email }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '1d' });
   return { accessToken, refreshToken };
 };
-app.get('/get',async (req,res)=>{
-  try{
-res.status(200).json({msg:"welcome"})
-  }catch(err){
-    res.status(404).json({msg:"not found"})
-  }
-})
 
-// Signup route
+// Signup
 app.post('/api/signup', async (req, res) => {
   const { username, email, password } = req.body;
-    if(!username || !email || !password){
-      return res.status(400).json({error:"All feilds are required"})
-    }
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
 
   try {
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ error: 'User already exists' });
     }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ username, email, password: hashedPassword });
     await user.save();
@@ -63,7 +58,7 @@ app.post('/api/signup', async (req, res) => {
   }
 });
 
-// Login route
+// Login
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -72,65 +67,65 @@ app.post('/api/login', async (req, res) => {
 
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) return res.status(400).json({ error: 'Invalid password' });
-   
-    const {accessToken , refreshToken} = generateTokens(user.email) 
-    res.cookie('refreshToken',refreshToken,{
-        httpOnly:true,
-        secure:true,
-        sameSite:'None'
-    })
-    return res.status(200).json({accessToken,refreshToken,user})
+
+    const { accessToken, refreshToken } = generateTokens(user.email);
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'None',
+      maxAge:3*24*60*60*1000
+    });
+    res.status(200).json({ accessToken });
   } catch (error) {
     res.status(500).json({ error: 'Error logging in' });
   }
 });
 
-app.post('/api/refresh-token', async (req,res)=>{
-  const user = await User.findOne({ email });
-  accessToken = jwt.sign({ _id:user._id}, process.env.JWT_SECRET, { expiresIn: '1m' });  
-  refreshToken = jwt.sign({ _id: user._id }, process.env.REFRESH_TOKEN_SECRET, { expiresIn: '1d' }); 
-  if(!refreshToken){
-    return res.status(403).json({error:"Refresh token is required"})
+// Refresh token
+app.post('/api/refresh-token', (req, res) => {
+  const { refreshToken } = req.cookies;
+
+  if (!refreshToken) {
+    return res.status(403).json({ error: 'Refresh token is required' });
   }
 
-try{
-  const verified = jwt.verify(refreshToken,process.env.REFRESH_TOKEN_SECRET);
-  const {accessToken,refreshToken:newRefreshToken} = generateTokens(verified.email)
-  res.json({accessToken,newRefreshToken})
+  try {
+    const verified = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+    const { accessToken, refreshToken: newRefreshToken } = generateTokens(verified.email);
 
-  return res.status(200).json(accessToken,newRefreshToken)
-}catch(err){
-  res.status(400).json({error:"Invalid refresh token"})
-}
+    res.cookie('refreshToken', newRefreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'None',
+    });
+    res.status(200).json({ accessToken });
+  } catch (err) {
+    res.status(400).json({ error: 'Invalid refresh token' });
+  }
+});
 
-})
-
-// Middleware to verify JWT
-app.get('/get-login',(req,res)=>{
-  res.status(200).json({res:"message"})
-})
-
+// Protected route
 const verifyToken = (req, res, next) => {
   const token = req.header('Authorization')?.split(' ')[1];
-  if (!token) {
-    return res.status(401).json({ error: 'Access denied' });
-  }
+  if (!token) return res.status(401).json({ error: 'Access denied' });
 
   try {
     const verified = jwt.verify(token, process.env.JWT_SECRET);
     req.user = verified;
     next();
-  } catch (err) {
-    res.status(400).json({ error: 'Invalid token' });
+  } catch {
+    res.status(401).json({ error: 'Invalid token' });
   }
 };
-app.get("*",(req,res)=>{
-  return res.status(404).json({message:'Notfound'})
-})
-// Protected route
+
 app.get('/api/protected', verifyToken, (req, res) => {
-  res.json({ message: 'This is a protected route', userId: req.user._id });
+  res.json({ message: 'Protected route accessed', email: req.user.email });
 });
 
-const PORT = process.env.PORT || 5002;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// Logout
+app.post('/api/logout', (req, res) => {
+  res.clearCookie('refreshToken', { httpOnly: true, secure: true, sameSite: 'None' });
+  res.status(200).json({ message: 'Logged out successfully' });
+});
+
+app.listen(5002, () => console.log('Server running on port 5002'));
